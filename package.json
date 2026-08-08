@@ -1,0 +1,25 @@
+{
+  "name": "cloudflare-utils-monorepo",
+  "private": true,
+  "packageManager": "bun@1.3.11",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "postinstall": "bun run --filter './packages/*' cf-typegen",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "build": "bun run --filter './packages/*' build",
+    "build:examples": "bun run build && bun run --filter './examples/*' build",
+    "typecheck": "bun run build && bun run --filter '*' typecheck",
+    "test": "bun run --filter './packages/*' test",
+    "changeset": "changeset",
+    "version": "changeset version && bun install --lockfile-only",
+    "release": "bun run build && changeset publish"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.7",
+    "@changesets/cli": "^2.31.1"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-utils-debounce-test",
+  "main": "./fixtures/worker.ts",
+  "compatibility_date": "2026-08-08",
+  "durable_objects": {
+    "bindings": [
+      { "name": "TEST_DEBOUNCE", "class_name": "TestDebounceAndLease" },
+      { "name": "CHAOS_DEBOUNCE", "class_name": "ChaosDebounceAndLease" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TestDebounceAndLease"] },
+    { "tag": "v2", "new_sqlite_classes": ["ChaosDebounceAndLease"] }
+  ]
+}

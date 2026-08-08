@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.11"
+
+      # Changesets shells out to `npm publish`, so the runner's npm is what authenticates against
+      # the registry. Trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.x, which
+      # would silently fall back to looking for a token. Provenance is automatic under OIDC for a
+      # public package from a public repo, so nothing here passes --provenance.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      # The bundled npm is whatever Node 24 shipped with. Upgrade explicitly rather than trust it
+      # to stay above the OIDC floor, and fail loudly here if it somehow doesn't.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # "typecheck" runs "build" first internally (see package.json) — each example resolves its
+      # "@samstarling/cloudflare-utils-*" dependency through a live workspace symlink into
+      # packages/, so that dist/ must exist before the example's typecheck can resolve the import.
+      - name: Lint, typecheck, test
+        run: |
+          bun run lint
+          bun run typecheck
+          bun run test
+
+      # "version" points at our own script rather than the action's default `changeset version`:
+      # it chains `bun install --lockfile-only` so the Version Packages PR carries a bun.lock
+      # matching the bumped package.json versions, instead of leaving it a commit behind.
+      - name: Create Version Packages PR or publish
+        uses: changesets/action@v1
+        with:
+          version: bun run version
+          publish: bun run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
