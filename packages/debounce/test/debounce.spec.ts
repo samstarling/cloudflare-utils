@@ -129,12 +129,8 @@ describe("max wait", () => {
     expect(await stub.getRunCount()).toBe(1);
   });
 
-  // A non-positive maxWaitMs is rejected in the constructor, alongside the existing
-  // quietPeriodMs/leaseDurationMs/maxReclaims checks. Not covered here for the same reason those
-  // aren't: a DO constructor takes no custom arguments, so the bad config has to be baked into a
-  // dedicated class and binding, and the pool then constructs it during RPC property lookup —
-  // outside any assertion's reach, surfacing as an unhandled rejection that fails the run even
-  // when the assertion itself passes.
+  // A non-positive maxWaitMs is rejected in the constructor — see config.spec.ts, which covers
+  // that alongside the quietPeriodMs/leaseDurationMs/maxReclaims/id-name checks.
 });
 
 describe("reserved storage keys", () => {

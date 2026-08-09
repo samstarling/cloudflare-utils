@@ -51,7 +51,7 @@ Watch the terminal running `bun run dev` for `[ExampleDebounceAndLease] running 
   `/api/:key/runs`), everything else falls through to the static frontend.
 - `src/do.ts` — `ExampleDebounceAndLease`, the concrete subclass wired up with real config. It
   also keeps its own run history under `example:`-prefixed storage keys, clear of the library's
-  reserved `__dbl:` prefix: the library reports the state machine via `status()`, not per-run
+  reserved `__debounce:` prefix: the library reports the state machine via `status()`, not per-run
   outcomes, so tracking those is a consumer's job.
 - `src/shared.ts` — types shared by the Worker and the browser bundle.
 - `src/client/` — the React dashboard, built and dev-served by

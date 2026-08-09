@@ -1,7 +1,7 @@
 import { DebounceAndLease } from "@samstarling/cloudflare-utils-debounce";
 import type { ExampleRun } from "./shared";
 
-// The library reserves the "__dbl:" storage key prefix, so everything this subclass persists is
+// The library reserves the "__debounce:" storage key prefix, so everything this subclass persists is
 // namespaced under its own prefix to stay clear of it.
 const RUNS_KEY = "example:runs";
 const LAST_RUN_AT_KEY = "example:lastRunAt";

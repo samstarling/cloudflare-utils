@@ -22,7 +22,7 @@ function required<T>(value: T | undefined, field: string): T {
  * the state machine rather than fail loudly. Everything the library owns lives under here, so
  * subclasses only need to avoid this one prefix.
  */
-const PREFIX = "__dbl:";
+const PREFIX = "__debounce:";
 
 const KEYS = {
   state: `${PREFIX}state`,

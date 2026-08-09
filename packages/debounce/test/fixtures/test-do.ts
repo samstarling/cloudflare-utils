@@ -94,7 +94,7 @@ export class TestDebounceAndLease extends DebounceAndLease<Env> {
 
   /**
    * Writes an unprefixed storage key, standing in for a subclass that persists its own state
-   * without knowing the library's key names — the collision the `__dbl:` prefix exists to prevent.
+   * without knowing the library's key names — the collision the `__debounce:` prefix exists to prevent.
    */
   async writeUnprefixedKey(key: string, value: unknown): Promise<void> {
     this.ctx.storage.kv.put(key, value);

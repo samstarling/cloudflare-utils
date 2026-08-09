@@ -103,7 +103,7 @@ export class SummaryDebounce extends DebounceAndLease<Env> {
 Two things that shape this design:
 
 - **One key per Durable Object, always.** The key *is* the object's id name, which is what lets a single alarm serve as that key's timer. A single object debouncing many keys would need its own scheduler and would serialize every caller behind one isolate; prefer one object per key and let the platform spread them out.
-- **The `__dbl:` prefix is reserved.** Subclasses share the same `storage.kv` namespace, so everything this library persists is prefixed. Namespace your own keys (as `dirty:` does above) and you can't collide with it.
+- **The `__debounce:` prefix is reserved.** Subclasses share the same `storage.kv` namespace, so everything this library persists is prefixed. Namespace your own keys (as `dirty:` does above) and you can't collide with it.
 
 ## Bounding the wait
 
@@ -136,7 +136,7 @@ Actions that aren't safe to run twice need their own downstream idempotency. Thi
 - **`run()` must eventually settle.** No internal timeout is enforced, so give it one of your own, well under `leaseDurationMs`. A `run()` that never settles is reclaimed up to `maxReclaims` times, after which `onExhausted` fires and the key goes `"exhausted"`. Treat `onExhausted` as your alert: it means a key needs `cancel()` to move again. A `signal()`/`flush()` on an exhausted key is queued rather than run, since that abandoned execution may still be alive.
 - **Fence your own side effects.** `epoch` identifies the current claim. The library uses it to stop a stale invocation from clobbering its own bookkeeping, but that doesn't protect your side effect. If your action isn't safe to run twice, check `this.isCurrentEpoch(epoch)` immediately before acting: `false` means a reclaim has superseded you and you should stop. This only helps if checked *before* the side effect, and is no substitute for idempotency.
 - **Never call `run()` directly on a stub.** It's `protected` at compile time only; Cloudflare's RPC exposes it at runtime regardless, and calling it bypasses the state machine. Only `signal()`, `flush()`, `status()` and `cancel()` are the public contract.
-- **Storage keys under `__dbl:` belong to the library.** Your subclass shares the same `storage.kv`, so prefix what you persist. A bare `state` or `claimEpoch` would have corrupted the state machine silently rather than failing loudly, which is why the library's own keys are namespaced.
+- **Storage keys under `__debounce:` belong to the library.** Your subclass shares the same `storage.kv`, so prefix what you persist. A bare `state` or `claimEpoch` would have corrupted the state machine silently rather than failing loudly, which is why the library's own keys are namespaced.
 - **A continuously-signalled key never runs without `maxWaitMs`.** See [Bounding the wait](#bounding-the-wait).
 
 ## Configuration
