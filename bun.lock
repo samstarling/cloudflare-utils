@@ -29,7 +29,7 @@
     },
     "packages/debounce": {
       "name": "@samstarling/cloudflare-utils-debounce",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "^0.20.3",
         "tsup": "^8.5.1",

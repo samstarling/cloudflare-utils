@@ -1,6 +1,6 @@
 {
   "name": "@samstarling/cloudflare-utils-debounce",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Debounce a burst of signals into one globally-exclusive, crash-recoverable action per key, on Cloudflare Durable Objects alone.",
   "type": "module",
   "license": "MIT",
