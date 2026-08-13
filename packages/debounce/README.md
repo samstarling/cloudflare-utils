@@ -20,10 +20,11 @@ stateDiagram-v2
     claimed --> claimed: lease expires, so reclaim and re-run
     claimed --> idle: run() settles
     claimed --> exhausted: reclaimed maxReclaims times
+    exhausted --> claimed: flush() recovers it and runs a fresh cycle
     exhausted --> idle: cancel(), or the abandoned run() finally settles
 ```
 
-`claimed` means `run()` is executing. Anything arriving while the key is `claimed` will be queued and executed when the run ends, so the key never runs twice at once. `exhausted` is a terminal state: it means a `run()` never settled and has stopped being reclaimed.
+`claimed` means `run()` is executing. Anything arriving while the key is `claimed` will be queued and executed when the run ends, so the key never runs twice at once. `exhausted` is a terminal state: it means a `run()` never settled and has stopped being reclaimed. It stays there until a `flush()` recovers it (starting a fresh cycle), a `cancel()` resets it, or the abandoned `run()` finally settles — a plain `signal()` only queues behind it.
 
 ## Integration
 
@@ -40,8 +41,8 @@ export class MyDebounceAndLease extends DebounceAndLease<Env> {
     });
   }
 
-  protected async run(key: string, epoch: number): Promise<void> {
-    // do some work
+  protected async run(key: string, epoch: number, signal: AbortSignal): Promise<void> {
+    // do some work; forward `signal` into anything you await so an overrunning run is torn down
   }
 }
 ```
@@ -90,9 +91,9 @@ export class SummaryDebounce extends DebounceAndLease<Env> {
     return this.signal();
   }
 
-  protected async run(key: string, epoch: number) {
+  protected async run(key: string, epoch: number, signal: AbortSignal) {
     const dirty = [...this.ctx.storage.kv.list({ prefix: "dirty:" })].map(([k]) => k.slice(6));
-    const summary = await generate(key, dirty, AbortSignal.timeout(120_000));
+    const summary = await generate(key, dirty, signal); // aborts at runTimeoutMs / leaseDurationMs
     if (!this.isCurrentEpoch(epoch)) return; // fence before the write
     await writeSummary(this.env, key, summary);
     for (const id of dirty) this.ctx.storage.kv.delete(`dirty:${id}`);
@@ -119,6 +120,47 @@ super(ctx, env, {
 
 The effective deadline becomes `min(now + quietPeriodMs, pendingSince + maxWaitMs)`, measured from the signal that first made the key pending, so it only ever pulls the run earlier. The window restarts on the next cycle. Setting `maxWaitMs` below `quietPeriodMs` turns the key into a throttle that fires every `maxWaitMs` — fine, if that's what you want.
 
+## Driving a Cloudflare Workflow
+
+A common shape is to have `run()` kick off a [Workflow](https://developers.cloudflare.com/workflows/) that does the heavy lifting. There are three things to get right, and the exclusivity guarantee depends on the first one:
+
+1. **`run()` must not return until the workflow is *finished*.** The key is held `claimed` only for as long as `run()` is pending. If `run()` returns as soon as it *creates* the workflow, the lock releases while the workflow is still running — and the next debounce window can start a second, overlapping workflow for the same key. Block until the instance reaches a terminal status, and size `leaseDurationMs` above the worst-case workflow runtime.
+2. **Create idempotently, with a deterministic instance ID.** A lease-expiry reclaim can start a second `run()` while the first is still alive (the [one documented exception](#the-guarantee)). Key the instance ID on the *unit of work* — a watermark, a version, a content hash — not on `epoch` (which changes on every reclaim), so the reclaim re-attaches to the same instance instead of racing a fresh one. `createBatch()` is idempotent (it skips IDs still within their retention window); `create()` throws on a duplicate ID, so catch that and treat it as success. Instance IDs max out at 100 characters.
+3. **Forward `signal`** into your status polling so a run that overruns its budget is torn down rather than left spinning until the lease reclaims it.
+
+```ts
+export class SummaryDebounce extends DebounceAndLease<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env, {
+      quietPeriodMs: 30_000,
+      maxWaitMs: 5 * 60_000,
+      leaseDurationMs: 20 * 60_000, // must exceed the workflow's worst-case runtime
+    });
+  }
+
+  protected async run(key: string, epoch: number, signal: AbortSignal): Promise<void> {
+    const watermark = await currentWatermark(this.env, key); // the DB is the source of truth
+    const id = `${key}-${watermark}`; // deterministic, ≤100 chars; NOT keyed on epoch
+
+    // Idempotent: a reclaimed second run() with the same watermark re-attaches instead of racing.
+    await this.env.SUMMARY_WORKFLOW.createBatch([{ id, params: { key, watermark } }]);
+
+    // Block until the workflow settles — this is what keeps the lock covering the real work.
+    const instance = await this.env.SUMMARY_WORKFLOW.get(id);
+    for (;;) {
+      const { status } = await instance.status();
+      if (status === "complete") return;
+      if (status === "errored" || status === "terminated") {
+        throw new Error(`workflow ${id} ended ${status}`); // reported via onRunError; key returns to idle
+      }
+      await scheduler.wait(2_000, { signal }); // rejects if the run's budget elapses
+    }
+  }
+}
+```
+
+**The DB stays the source of truth for staleness, not the Durable Object.** Treat pokes and alarms as latency optimisations, and back them with a cron reconciler that finds keys where `source_watermark > summary_watermark` and calls `flush()` (not `signal()`) on them. `flush()` recovers even an [`exhausted`](#the-guarantee) key — one whose workflow died `maxReclaims` times — so the reconciler can call it unconditionally without inspecting state first. That combination is what makes the system eventually complete even if a poke, an alarm, or a whole workflow run is lost.
+
 ## The guarantee
 
 At most one execution is in flight per key, except for a bounded window right after an unreleased execution's lease expires. In that window a second execution may legitimately start before the first is confirmed finished.
@@ -126,14 +168,14 @@ At most one execution is in flight per key, except for a bounded window right af
 Retries are lease-driven, not error-driven:
 
 - A `run()` that **throws** is not retried. The key returns to idle once `onRunError` fires, and nothing runs again until a new `signal()`/`flush()` arrives.
-- A `run()` that **hangs or is silently killed** is retried every `leaseDurationMs` until it settles, or until `maxReclaims` is hit and the key goes `exhausted`.
+- A `run()` that **hangs or is silently killed** is retried every `leaseDurationMs` until it settles, or until `maxReclaims` is hit and the key goes `exhausted`. `run()` is also handed an `AbortSignal` that fires at `runTimeoutMs` (default `leaseDurationMs`), so a run that forwards it can be torn down at its budget rather than waiting on the lease.
 
 Actions that aren't safe to run twice need their own downstream idempotency. This library doesn't provide that. The `epoch` might help you: see below.
 
 ## Important points
 
 - **In-flight calls coalesce.** A `signal()` or `flush()` arriving mid-execution isn't dropped. Instead, it's queued and run once that execution ends. A queued `signal()` starts a fresh debounce window, a queued `flush()` fires immediately. `flush()` on an idle key is a no-op.
-- **`run()` must eventually settle.** No internal timeout is enforced, so give it one of your own, well under `leaseDurationMs`. A `run()` that never settles is reclaimed up to `maxReclaims` times, after which `onExhausted` fires and the key goes `"exhausted"`. Treat `onExhausted` as your alert: it means a key needs `cancel()` to move again. A `signal()`/`flush()` on an exhausted key is queued rather than run, since that abandoned execution may still be alive.
+- **`run()` must eventually settle.** It's handed an `AbortSignal` that fires at `runTimeoutMs` (or, unset, at `leaseDurationMs`) — forward it into whatever you await, or check `signal.aborted`, so an overrunning run is torn down. Ignoring it is safe but leaves recovery to the lease. A `run()` that never settles is reclaimed up to `maxReclaims` times, after which `onExhausted` fires and the key goes `"exhausted"`. Treat `onExhausted` as your alert. To move an exhausted key, `flush()` recovers it and starts a fresh cycle, or `cancel()` resets it to idle; a plain `signal()` only queues behind it, since the abandoned execution may still be alive. A cron reconciler backing this should therefore call `flush()`, not `signal()`.
 - **Fence your own side effects.** `epoch` identifies the current claim. The library uses it to stop a stale invocation from clobbering its own bookkeeping, but that doesn't protect your side effect. If your action isn't safe to run twice, check `this.isCurrentEpoch(epoch)` immediately before acting: `false` means a reclaim has superseded you and you should stop. This only helps if checked *before* the side effect, and is no substitute for idempotency.
 - **Never call `run()` directly on a stub.** It's `protected` at compile time only; Cloudflare's RPC exposes it at runtime regardless, and calling it bypasses the state machine. Only `signal()`, `flush()`, `status()` and `cancel()` are the public contract.
 - **Storage keys under `__debounce:` belong to the library.** Your subclass shares the same `storage.kv`, so prefix what you persist. A bare `state` or `claimEpoch` would have corrupted the state machine silently rather than failing loudly, which is why the library's own keys are namespaced.
@@ -146,6 +188,7 @@ Actions that aren't safe to run twice need their own downstream idempotency. Thi
 | `quietPeriodMs` | How long a key must go without a new signal before its action runs. |
 | `maxWaitMs` | Optional ceiling on how long a key may stay pending before running anyway, measured from the signal that first made it pending. Unset means no ceiling, so a continuously-signalled key never runs. |
 | `leaseDurationMs` | How long a claimed execution may run before it's presumed dead and the key becomes eligible again. |
+| `runTimeoutMs` | Optional. When the `AbortSignal` handed to `run()` fires. Defaults to `leaseDurationMs`; set it lower to leave margin for `run()` to settle before the lease reclaims. Must be positive and ≤ `leaseDurationMs`. |
 | `maxReclaims` | How many times a lease may expire on the same unconfirmed execution before the key goes `"exhausted"`. Defaults to 10 (exported as `DEFAULT_MAX_RECLAIMS`); pass `Infinity` to retry forever. |
 | `onRunError` | Optional `(error, key) => void` called when `run()` throws. The error is otherwise swallowed; recovery timing is governed by the lease, not by rethrowing. |
 | `onExhausted` | Optional `(key, reclaimCount) => void` called once `maxReclaims` is exceeded and the key goes `"exhausted"`. No further reclaim is scheduled. |

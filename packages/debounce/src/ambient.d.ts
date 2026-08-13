@@ -12,6 +12,18 @@ interface AlarmInvocationInfo {
   readonly scheduledTime: number;
 }
 
+// Only the slice of the platform's AbortSignal this library touches: it constructs one via
+// `AbortSignal.timeout()` and hands it to run(). `aborted` is included so a subclass compiled
+// against these build-only types can still read it. The real, fuller definition is supplied by
+// the consumer's runtime types at their build time (and by the test types during typecheck).
+interface AbortSignal {
+  readonly aborted: boolean;
+}
+declare const AbortSignal: {
+  prototype: AbortSignal;
+  timeout(milliseconds: number): AbortSignal;
+};
+
 interface SyncKvStorage {
   get<T = unknown>(key: string): T | undefined;
   put<T>(key: string, value: T): void;

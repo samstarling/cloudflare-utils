@@ -71,6 +71,22 @@ export abstract class DebounceAndLease<Env = unknown> extends DurableObject<Env>
     if (config.maxWaitMs !== undefined && config.maxWaitMs <= 0) {
       throw new Error("maxWaitMs must be positive when set.");
     }
+    if (config.runTimeoutMs !== undefined) {
+      if (config.runTimeoutMs <= 0) {
+        throw new Error("runTimeoutMs must be positive when set.");
+      }
+      if (config.runTimeoutMs > config.leaseDurationMs) {
+        throw new Error(
+          "runTimeoutMs must not exceed leaseDurationMs — a longer run timeout can never fire " +
+            "before the lease reclaims the execution.",
+        );
+      }
+    }
+  }
+
+  /** How long `run()` may execute before its `AbortSignal` fires, defaulting to the full lease. */
+  private get effectiveRunTimeoutMs(): number {
+    return this.config.runTimeoutMs ?? this.config.leaseDurationMs;
   }
 
   /** The reclaim cap in force, falling back to the library default when unconfigured. */
@@ -92,8 +108,14 @@ export abstract class DebounceAndLease<Env = unknown> extends DurableObject<Env>
    * doing it — false means a reclaim has already superseded this invocation and it should stop
    * rather than act. This is a mitigation, not a substitute for idempotency: it only helps if
    * `run()` checks it before the side effect, not after.
+   *
+   * `signal` aborts after `runTimeoutMs` (or, unset, after `leaseDurationMs`). Forward it into
+   * whatever `run()` awaits — a `fetch`, a workflow-status poll, an LLM call — or check
+   * `signal.aborted`, so a run that overruns its budget is torn down promptly instead of leaving
+   * the key claimed until the lease reclaims it. Ignoring it is safe; the lease is still the
+   * backstop.
    */
-  protected abstract run(key: string, epoch: number): Promise<void>;
+  protected abstract run(key: string, epoch: number, signal: AbortSignal): Promise<void>;
 
   /** True if `epoch` (as passed to `run()`) is still the key's current claim. */
   protected isCurrentEpoch(epoch: number): boolean {
@@ -169,9 +191,22 @@ export abstract class DebounceAndLease<Env = unknown> extends DurableObject<Env>
   async flush(): Promise<DebounceAndLeaseStatus> {
     const kv = this.ctx.storage.kv;
     const state = kv.get<string>(KEYS.state);
-    // As in signal(): queued rather than run, since the abandoned execution may still be alive.
-    if (state === "claimed" || state === "exhausted") {
+    // A run is genuinely in flight: queue rather than start a competitor, exactly as signal() does.
+    if (state === "claimed") {
       kv.put(KEYS.coalesced, "flush" satisfies Coalesced);
+      return this.status();
+    }
+    // Terminal: an abandoned run() we'd already given up reclaiming. flush() means "make forward
+    // progress now", so recover the key and start a fresh cycle rather than queue behind a run
+    // that may never confirm. claimAndRun() bumps the claim epoch, so if that abandoned run() ever
+    // does settle late, its finishClaim() (and any isCurrentEpoch check) no-ops against the stale
+    // epoch instead of clobbering this cycle. Reset the reclaim budget — this is a new execution —
+    // and drop any coalesced intent this flush subsumes. This is the reconciler's recovery path:
+    // it can call flush() unconditionally without first inspecting for the exhausted state.
+    if (state === "exhausted") {
+      kv.delete(KEYS.reclaimCount);
+      kv.delete(KEYS.coalesced);
+      await this.claimAndRun();
       return this.status();
     }
     if (state === "pending") {
@@ -287,8 +322,9 @@ export abstract class DebounceAndLease<Env = unknown> extends DurableObject<Env>
   }
 
   private async runAndFinish(myEpoch: number): Promise<void> {
+    const signal = AbortSignal.timeout(this.effectiveRunTimeoutMs);
     try {
-      await this.run(this.key, myEpoch);
+      await this.run(this.key, myEpoch, signal);
     } catch (err) {
       this.invokeOnRunError(err);
     }

@@ -326,7 +326,7 @@ describe("giving up", () => {
     expect(await stub.getExhaustedEvents()).toEqual([]);
   });
 
-  it("queues rather than runs a signal()/flush() arriving at an exhausted key, and arms no alarm", async () => {
+  it("queues a signal() arriving at an exhausted key, and arms no alarm", async () => {
     const { stub } = freshStub();
     await stub.setRunBehavior("hang");
     await stub.setMaxReclaims(0);
@@ -344,13 +344,32 @@ describe("giving up", () => {
     expect(afterSignal.state).toBe("exhausted");
     expect(afterSignal.coalescedPending).toBe(true);
 
-    const afterFlush = await stub.flush();
-    expect(afterFlush.state).toBe("exhausted");
-
-    // Nothing fires, however long we wait: an exhausted key is terminal until cancel().
+    // Nothing fires from a queued signal(), however long we wait: only flush() or cancel() move a
+    // terminal key.
     await wait(LEASE_DURATION_MS * 3);
     expect(await stub.getRunCount()).toBe(1);
     expect((await stub.status()).state).toBe("exhausted");
+  });
+
+  it("flush() recovers an exhausted key and runs a fresh cycle, without a cancel()", async () => {
+    const { stub } = freshStub();
+    await stub.setRunBehavior("hang");
+    await stub.setMaxReclaims(0);
+
+    await stub.signal();
+    await stub.flush();
+    await wait(LEASE_DURATION_MS + MARGIN_MS);
+    expect((await stub.status()).state).toBe("exhausted");
+    expect(await stub.getRunCount()).toBe(1);
+
+    // flush() means "make forward progress now". Unlike signal(), it resets the given-up key and
+    // starts a fresh execution rather than queuing behind the abandoned one — this is what lets a
+    // reconciler recover a stuck key by calling flush() unconditionally.
+    await stub.setRunBehavior("succeed");
+    await stub.flush();
+    expect(await stub.getRunCount()).toBe(2);
+    await wait(MARGIN_MS);
+    expect((await stub.status()).state).toBe("idle");
   });
 
   it("returns an exhausted key to idle if its abandoned run() finally settles for real", async () => {
@@ -412,6 +431,25 @@ describe("fencing your own side effects", () => {
     await wait(150);
 
     expect(await stub.getEpochChecks()).toEqual([false]); // epoch 1 found itself superseded
+    expect((await stub.status()).state).toBe("idle");
+  });
+});
+
+describe("run timeout", () => {
+  it("aborts the signal handed to run() at runTimeoutMs, well before the lease expires", async () => {
+    const { stub } = freshStub();
+    // 30ms timeout against the fixture's 80ms lease: the abort must land first, so the run settles
+    // on the ordinary completion path rather than being reclaimed.
+    await stub.setRunTimeoutMs(QUIET_PERIOD_MS);
+    await stub.setRunBehavior("watch-abort");
+
+    await stub.signal();
+    await stub.flush(); // claims and starts the run, which only waits on its abort signal
+    expect(await stub.wasAborted()).toBe(false); // still within the timeout window
+
+    await wait(QUIET_PERIOD_MS + MARGIN_MS);
+    expect(await stub.wasAborted()).toBe(true); // aborted on schedule
+    expect(await stub.getRunCount()).toBe(1); // and never reclaimed
     expect((await stub.status()).state).toBe("idle");
   });
 });

@@ -24,6 +24,19 @@ export interface DebounceAndLeaseConfig {
    */
   maxWaitMs?: number;
   /**
+   * How long `run()` may execute before the `AbortSignal` handed to it is aborted. Defaults to
+   * `leaseDurationMs`, so by default `run()` is signalled to stop no later than the moment its
+   * lease would expire and be reclaimed. Set it lower to leave margin — enough for `run()` to
+   * observe the abort and settle *before* the lease expires, so the ordinary completion path runs
+   * instead of a reclaim.
+   *
+   * The signal is only useful if `run()` forwards it (into `fetch`, a workflow-status poll, an
+   * LLM call, etc.) or checks `signal.aborted`; a `run()` that ignores it simply runs until the
+   * lease reclaims it, exactly as before. Must be positive and no greater than `leaseDurationMs`
+   * (a longer timeout could never fire — the lease reclaims first).
+   */
+  runTimeoutMs?: number;
+  /**
    * How many times a lease may expire on the same unconfirmed execution before giving up on it
    * automatically. Defaults to {@link DEFAULT_MAX_RECLAIMS}; pass `Infinity` to retry forever.
    * Once exceeded, the key moves to the terminal `"exhausted"` state (no further reclaim is
